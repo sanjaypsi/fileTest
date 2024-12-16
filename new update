@@ -1,0 +1,447 @@
+import os
+import sys
+import logging
+from PySide2.QtWidgets import (
+	QWidget, QMainWindow, QMessageBox, QScrollArea, QVBoxLayout, QLabel
+)
+from PySide2.QtCore import Qt, QFile
+from PySide2 import QtUiTools
+import maya.OpenMayaUI as omui
+from shiboken2 import wrapInstance
+import maya.cmds as cmds
+import maya.OpenMaya as om
+from maya.api.OpenMaya import MFnDependencyNode
+
+import importlib
+
+# External modules
+import LoadCollapsed_widget
+importlib.reload(LoadCollapsed_widget)
+import Collapsible
+importlib.reload(Collapsible)
+
+# Configure Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Paths and Stylesheets
+SCRIPT_LOC = os.path.dirname(__file__)
+collapseWidgetUI = os.path.join(SCRIPT_LOC, 'ui', 'HeadUI01.ui')
+
+SLIDER_STYLESHEET = """
+QSlider::groove:horizontal {
+	border: 1px solid #999;
+	height: 6px;
+	background: #ccc;
+	margin: 0px;
+	border-radius: 3px;
+}
+QSlider::handle:horizontal {
+	background: #5c5c5c;
+	border: 1px solid #444;
+	width: 14px;
+	margin: -5px 0;
+	border-radius: 7px;
+}
+QSlider::handle:horizontal:hover {
+	background: #787878;
+	border: 1px solid #555;
+}
+QSlider::sub-page:horizontal {
+	background: #409eff;
+	border: 1px solid #5a9;
+	height: 6px;
+	border-radius: 3px;
+}
+QSlider::add-page:horizontal {
+	background: #ccc;
+	border: 1px solid #999;
+	height: 6px;
+	border-radius: 3px;
+}
+"""
+
+def get_maya_window():
+	"""Get Maya's main window as a PySide2 object."""
+	main_window_ptr = omui.MQtUtil.mainWindow()
+	if not main_window_ptr:
+		raise RuntimeError("Failed to obtain Maya's main window.")
+	return wrapInstance(int(main_window_ptr), QWidget)
+
+def load_ui(ui_file, parent=None):
+	"""Load the .ui file and return the corresponding widget."""
+	loader = QtUiTools.QUiLoader()
+	ui_file = QFile(ui_file)
+	if not ui_file.exists():
+		raise FileNotFoundError(f"UI file {ui_file.fileName()} not found.")
+	ui_file.open(QFile.ReadOnly)
+	ui_widget = loader.load(ui_file, parent)
+	ui_file.close()
+	if not ui_widget:
+		raise RuntimeError(f"Failed to load UI file {ui_file.fileName()}.")
+	return ui_widget
+
+class MyWindow(QMainWindow):
+	"""Main window class."""
+	def __init__(self, parent=None):
+		super(MyWindow, self).__init__(parent)
+		self.main_ui = os.path.join(SCRIPT_LOC, "ui", "main02.ui")
+		if not os.path.exists(self.main_ui):
+			raise FileNotFoundError(f"UI file not found: {self.main_ui}")
+
+		logging.info(f"Loading UI from: {self.main_ui}")
+		self.ui = load_ui(self.main_ui, parent=self)
+
+		# Setup the window
+		self.setWindowTitle("Master File Manager ver2.0")
+		self.resize(500, 700)
+
+		# Scrollable area
+		self.scroll_area = QScrollArea(self)
+		self.scroll_area.setWidget(self.ui)
+		self.scroll_area.setWidgetResizable(True)
+		self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+		self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+		self.headUI = None
+		self.callback_id_map = {}  # Store callback IDs for cleanup
+
+		# Map sliders to control attributes
+		self.slider_control_map = {
+			"sliderSacler01": "con_world_L.all_scale",
+			"sliderSacler02": "con_world_L.all_translate",
+		}
+
+		self.setCentralWidget(self.scroll_area)
+		self.init_ui()
+		self.create_connections()
+		self.create_menu_bar()
+		self.configure_splitters()
+		self.add_ui_widget()
+		self.setup_sliders()
+		self.connect_dynamic_sliders()
+		self.mainSlider_dynamic()
+		self.connect_to_controls()
+
+	def init_ui(self):
+		"""Initialize the UI."""
+		self.ui.destroyed.connect(self.on_exit_code)
+		self.create_callbacks()
+
+	def create_connections(self):
+		"""Connect signals to slots."""
+		# Placeholder for connecting signals to UI interactions
+		logging.info("Connections initialized.")
+
+	def create_menu_bar(self):
+		"""Create a menu bar for the application."""
+		menu_bar = self.menuBar()
+
+		# File menu
+		file_menu = menu_bar.addMenu("File")
+		file_menu.addAction("Open")
+		file_menu.addAction("Save")
+		file_menu.addSeparator()
+		exit_action = file_menu.addAction("Exit")
+		exit_action.triggered.connect(self.close)
+
+		# Edit menu
+		edit_menu = menu_bar.addMenu("Edit")
+		edit_menu.addAction("Undo")
+		edit_menu.addAction("Redo")
+		edit_menu.addSeparator()
+		edit_menu.addAction("Preferences")
+
+		# Help menu
+		help_menu = menu_bar.addMenu("Help")
+		about_action = help_menu.addAction("About")
+		about_action.triggered.connect(self.show_about_dialog)
+
+	def configure_splitters(self):
+		sliders = ['sliderSacler01', 'sliderSacler02']
+		for slider_name in sliders:
+			slider_widget = getattr(self.ui, slider_name, None)
+			if slider_widget:
+				slider_widget.setStyleSheet(SLIDER_STYLESHEET)
+
+	def add_ui_widget(self):
+		"""Add collapsible functionality to the layout."""
+		self.headUI = LoadCollapsed_widget._loadWidget(widgetCollapse=collapseWidgetUI)._loadUI()
+		# self.headUI.setMinimumHeight(300)
+		# self.headUI.setMinimumWidth(500)
+
+		main_layout = getattr(self.ui, "CollapseLayout", None)
+		if not main_layout:
+			logging.warning("Main layout not found. Creating a new QVBoxLayout.")
+			main_layout = QVBoxLayout(self.ui)
+			self.ui.setLayout(main_layout)
+
+		# Add collapsible tabs
+		tabs = [
+			("Tab 1", self.headUI),
+			("Tab 2", QLabel("Content for Tab 2")),
+			("Tab 3", QLabel("Content for Tab 3"))
+		]
+
+		for title, content in tabs:
+			tab = Collapsible.CollapsibleTab(title)
+			tab.content_layout.addWidget(content)
+			main_layout.addWidget(tab)
+
+		main_layout.addStretch()
+
+	def show_about_dialog(self):
+		"""Display an About dialog."""
+		QMessageBox.about(self, "About", "Master File Manager ver2.0\nCreated using PySide2 for Maya.")
+
+	# ================================================================================================================
+	# Setup Process :-
+	# ================================================================================================================
+	def mainSlider_dynamic(self):
+		# Define default float range
+		float_min, float_max = 0.0, 10.0
+
+		# Map sliders to their corresponding QLineEdits
+		slider_label_map = {
+			"sliderSacler01": "lineEditSacler01",
+			"sliderSacler02": "lineEditSacler02",
+		}
+
+		for slider_name, lineEdit_name in slider_label_map.items():
+			# Get the slider and QLineEdit widgets
+			slider 		= getattr(self.ui, slider_name, None)
+			lineEdit 	= getattr(self.ui, lineEdit_name, None)
+			if not slider or not lineEdit:
+				print(f"Error: {slider_name} or {lineEdit_name} widget not found!")
+				continue
+			
+			# Connect slider value change to update QLineEdit
+			slider.valueChanged.connect(
+				lambda value, le=lineEdit: le.setText(f"{float_min + value * (float_max - float_min) / 100:.2f}")
+			)
+			# Initialize QLineEdit with the slider's current value
+			lineEdit.setText(f"{float_min + slider.value() * (float_max - float_min) / 100:.2f}")
+			# Connect QLineEdit editingFinished to update slider
+			lineEdit.editingFinished.connect(
+				lambda le=lineEdit, sl=slider: self.update_slider_from_line_edit(le, sl, float_min, float_max)
+			)
+
+	def setup_sliders(self):
+		"""Apply stylesheets and configure sliders and splitters."""
+		slider_names = ["HeadSliderSize", "HeadSliderScaleX", "HeadSliderScaleY", 
+						"HeadSliderScaleZ", "HeadSliderUpDn", "HeadSliderFntBack",
+						"HeadSliderRotate"
+						]
+		for name in slider_names:
+			slider = getattr(self.headUI, name, None)
+			if slider:
+				slider.setStyleSheet(SLIDER_STYLESHEET)
+			else:
+				logging.warning(f"Slider {name} not found.")
+
+	def connect_dynamic_sliders(self):
+		"""Connect sliders to update corresponding QLineEdit widgets with float values."""
+		slider_label_map = {
+			"HeadSliderSize"	: "HeadLineEditScaleA",
+			"HeadSliderScaleX"	: "HeadLineEditScaleX",
+			"HeadSliderScaleY"	: "HeadLineEditScaleY",
+			"HeadSliderScaleZ"	: "HeadLineEditScaleZ",
+			"HeadSliderUpDn"	: "HeadLineEditUpDn",
+			"HeadSliderFntBack"	: "HeadLineEditFntBack",
+			"HeadSliderRotate"	: "HeadLineEditRotate",
+		}
+
+		# Float range
+		float_min, float_max = 0.0, 10.0
+
+		for slider_name, lineEdit_name in slider_label_map.items():
+			slider 		= getattr(self.headUI, slider_name, None)
+			lineEdit 	= getattr(self.headUI, lineEdit_name, None)
+
+			if not slider or not lineEdit:
+				print(f"Missing widget: {slider_name if not slider else lineEdit_name}")
+				continue
+
+			# Set slider range
+			slider.setMinimum(0)
+			slider.setMaximum(100)
+
+			# Connect slider to update QLineEdit
+			slider.valueChanged.connect(
+				lambda value, le=lineEdit: le.setText(f"{float_min + value * (float_max - float_min) / 100:.2f}")
+			)
+
+			# Connect QLineEdit to update slider
+			lineEdit.editingFinished.connect(lambda le=lineEdit, s=slider: self.update_slider_from_line_edit(le, s, float_min, float_max))
+
+			# Initialize QLineEdit with the slider's value
+			lineEdit.setText(f"{float_min + slider.value() * (float_max - float_min) / 100:.2f}")
+
+	def update_slider_from_line_edit(self, lineEdit,
+									slider, float_min,
+									float_max):
+		"""Update slider value based on QLineEdit text."""
+		try:
+			float_value = float(lineEdit.text())
+			slider_value = int((float_value - float_min) * 100 / (float_max - float_min))
+			slider.setValue(slider_value)
+		except ValueError:
+			print(f"Invalid input in {lineEdit.objectName()}: {lineEdit.text()}")
+
+	# ================================================================================================================
+	# Setup Process Main Slider Gloabal Value  :-
+	# ================================================================================================================
+
+	def connect_to_controls(self):
+		"""Connect sliders and line edits to Maya attributes."""
+		float_min, float_max = 0.0, 10.0
+
+		for slider_name, control_attr in self.slider_control_map.items():
+			slider = getattr(self.ui, slider_name, None)
+			line_edit_name = slider_name.replace("slider", "lineEdit")
+			line_edit = getattr(self.ui, line_edit_name, None)
+
+			if not slider or not line_edit:
+				logging.warning(f"Slider or LineEdit not found for {slider_name}")
+				continue
+
+			try:
+				value = cmds.getAttr(control_attr)
+				slider_value = int((value - float_min) / (float_max - float_min) * 100)
+				slider.setValue(slider_value)
+				line_edit.setText(f"{value:.2f}")
+
+				slider.valueChanged.connect(
+					lambda v, attr=control_attr, le=line_edit: self.update_attribute_and_line_edit(v, attr, le, float_min, float_max)
+				)
+				line_edit.editingFinished.connect(
+					lambda le=line_edit, sl=slider, attr=control_attr: self.update_attribute_and_slider(le, sl, attr, float_min, float_max)
+				)
+			except RuntimeError as e:
+				logging.warning(f"Error connecting {slider_name}: {e}")			
+
+	def create_callbacks(self):
+		"""Create Maya callbacks to monitor attribute changes."""
+		for slider_name, control_attr in self.slider_control_map.items():
+			try:
+				node, attr = control_attr.split('.', 1)
+				# Check if the node exists
+				if not cmds.objExists(node):
+					logging.warning(f"Node '{node}' does not exist. Skipping callback.")
+					continue
+
+				# Check if the attribute exists
+				if not cmds.attributeQuery(attr, node=node, exists=True):
+					logging.warning(f"Attribute '{attr}' does not exist on node '{node}'. Skipping callback.")
+					continue
+
+				# Retrieve the MObject
+				mobject = self.get_mobject(node)
+				if not mobject or mobject.isNull():
+					logging.error(f"Failed to retrieve a valid MObject for node '{node}'.")
+					continue
+
+				# Set up the callback
+				callback_id = om.MNodeMessage.addAttributeChangedCallback(
+					mobject,
+					lambda msg, plug, otherPlug, attr=control_attr: self.on_attribute_changed(msg, plug, attr)
+				)
+				self.callback_id_map[control_attr] = callback_id
+			except Exception as e:
+				logging.error(f"Error creating callback for '{control_attr}': {e}")
+
+	def get_mobject(self, node_name):
+		"""Get the MObject for a Maya node."""
+		try:
+			sel_list = om.MSelectionList()
+			sel_list.add(node_name)
+			mobject = om.MObject()
+			sel_list.getDependNode(0, mobject)
+
+			# Validate the MObject
+			if mobject.isNull():
+				logging.error(f"MObject for node '{node_name}' is null.")
+				return None
+			return mobject
+		except RuntimeError as e:
+			logging.error(f"Failed to get MObject for node '{node_name}': {e}")
+			return None
+
+	def on_attribute_changed(self, msg, plug, control_attr):
+		"""Callback triggered when a Maya attribute is changed."""
+		if not (msg & om.MNodeMessage.kAttributeSet):
+			return  # Skip irrelevant messages
+
+		try:
+			# Validate the plug and node
+			mobject = plug.node()
+			if not mobject or mobject.isNull():
+				logging.warning(f"Invalid MObject encountered for attribute '{control_attr}'.")
+				return
+
+			# Get the node name using MFnDependencyNode
+			fn_dep_node = om.MFnDependencyNode(mobject)
+			node_name = fn_dep_node.name()
+
+			attr_name = f"{node_name}.{plug.partialName()}"
+			if not cmds.objExists(attr_name):
+				logging.warning(f"Attribute '{attr_name}' no longer exists. Skipping.")
+				return
+
+			# Get the attribute value
+			value = cmds.getAttr(attr_name)
+
+			# Update UI elements
+			for slider_name, mapped_attr in self.slider_control_map.items():
+				if mapped_attr == attr_name:
+					slider = getattr(self.ui, slider_name, None)
+					line_edit_name = slider_name.replace("slider", "lineEdit")
+					line_edit = getattr(self.ui, line_edit_name, None)
+
+					if slider and line_edit:
+						float_min, float_max = 0.0, 10.0
+						slider_value = int((value - float_min) / (float_max - float_min) * 100)
+						slider.setValue(slider_value)
+						line_edit.setText(f"{value:.2f}")
+		except Exception as e:
+			logging.error(f"Error handling attribute change for '{control_attr}': {e}")
+
+
+	def update_attribute_and_line_edit(self, slider_value, control_attr, line_edit, float_min, float_max):
+		"""Update the Maya attribute and line edit based on the slider value."""
+		float_value = float_min + slider_value * (float_max - float_min) / 100
+		cmds.setAttr(control_attr, float_value)
+		line_edit.setText(f"{float_value:.2f}")
+
+	def update_attribute_and_slider(self, line_edit, slider, control_attr, float_min, float_max):
+		"""Update the Maya attribute and slider based on the line edit value."""
+		float_value = float(line_edit.text())
+		slider_value = int((float_value - float_min) / (float_max - float_min) * 100)
+		cmds.setAttr(control_attr, float_value)
+		slider.setValue(slider_value)
+
+	def on_exit_code(self):
+		"""Cleanup when the UI is closed."""
+		self.remove_callbacks()
+		self.deleteLater()
+
+	def remove_callbacks(self):
+		"""Remove all Maya callbacks."""
+		for attr, callback_id in self.callback_id_map.items():
+			try:
+				om.MMessage.removeCallback(callback_id)
+			except Exception as e:
+				logging.error(f"Error removing callback for {attr}: {e}")
+
+# ===================================================================================================================
+def show_window():
+	"""Show the window."""
+	global my_window
+	if 'my_window' in globals() and my_window is not None:
+		try:
+			my_window.close()
+			my_window.deleteLater()
+		except Exception as e:
+			logging.error(f"Error closing existing window: {e}")
+
+	my_window = MyWindow(parent=get_maya_window())
+	my_window.show()
