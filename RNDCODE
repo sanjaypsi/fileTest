@@ -1,0 +1,180 @@
+import os
+import sys
+import maya.cmds as cmds
+from PySide2.QtWidgets import QWidget, QMainWindow
+from PySide2 import QtWidgets, QtCore, QtUiTools
+import maya.OpenMayaUI as omui
+import maya.OpenMaya as om
+from shiboken2 import wrapInstance
+
+# ==========================================================================================================
+sliderStyleSheet = """
+QSlider::groove:horizontal {
+	border: 1px solid #999;
+	height: 6px;
+	background: #ccc;
+	margin: 0px;
+	border-radius: 3px;
+}
+QSlider::handle:horizontal {
+	background: #5c5c5c;
+	border: 1px solid #444;
+	width: 14px;
+	margin: -5px 0; /* Ensures the handle is properly positioned */
+	border-radius: 7px;
+}
+QSlider::handle:horizontal:hover {
+	background: #787878;
+	border: 1px solid #555;
+}
+QSlider::sub-page:horizontal {
+	background: #409eff;
+	border: 1px solid #5a9;
+	height: 6px;
+	border-radius: 3px;
+}
+QSlider::add-page:horizontal {
+	background: #ccc;
+	border: 1px solid #999;
+	height: 6px;
+	border-radius: 3px;
+}
+"""
+
+# ==========================================================================================================
+SCRIPT_LOC = os.path.dirname(__file__)
+icons = os.path.join(SCRIPT_LOC, 'resource')
+
+# ==========================================================================================================
+def get_maya_window():
+	"""Get Maya's main window as a PySide2 object."""
+	main_window_ptr = omui.MQtUtil.mainWindow()
+	if not main_window_ptr:
+		raise RuntimeError("Failed to obtain Maya's main window.")
+	return wrapInstance(int(main_window_ptr), QWidget)
+
+# ==========================================================================================================
+def load_ui(ui_file, parent=None):
+	"""Load the .ui file and return the corresponding widget."""
+	loader = QtUiTools.QUiLoader()
+	ui_file = QtCore.QFile(ui_file)
+	if not ui_file.exists():
+		raise FileNotFoundError(f"UI file {ui_file.fileName()} not found.")
+	ui_file.open(QtCore.QFile.ReadOnly)
+	ui_widget = loader.load(ui_file, parent)
+	ui_file.close()
+	if not ui_widget:
+		raise RuntimeError(f"Failed to load UI file {ui_file.fileName()}.")
+	return ui_widget
+
+# ==========================================================================================================
+class MyWindow(QMainWindow):
+	"""Main window class."""
+	def __init__(self, parent=None):
+		super(MyWindow, self).__init__(parent)
+		self.main_ui = os.path.join(SCRIPT_LOC, "ui", "main.ui")
+		if not os.path.exists(self.main_ui):
+			raise FileNotFoundError(f"UI file not found: {self.main_ui}")
+		print(f"Loading UI from: {self.main_ui}")
+		self.ui = load_ui(self.main_ui, parent=self)
+		if not self.ui:
+			raise RuntimeError("UI failed to load.")
+		
+		# Setup the window
+		self.setWindowTitle("Master File Manager ver2.0")
+		self.resize(500, 700)
+		self.setCentralWidget(self.ui)
+		self.init_ui()
+
+		# Map sliders to control attributes
+		self.slider_control_map = {
+			"sliderSacler01": "con_world_L.all_scale",
+			"sliderSacler02": "con_world_L.all_translate",
+		}
+
+		self.createConnections()
+		self.add_layers()
+		self.create_callback()
+
+	def init_ui(self):
+		"""Initialize the UI."""
+		self.ui.destroyed.connect(self.on_exit_code)
+
+	def createConnections(self):
+		"""Create the signal/slot connections."""
+		self.ui.sliderSacler.valueChanged.connect(self.update_sphere_translation)
+		self.ui.reset_button.clicked.connect(self.reset_sphere_translation)
+
+	def on_exit_code(self):
+		"""Cleanup when the UI is closed."""
+		sys.stdout.write("UI successfully closed\n")
+		self.deleteLater()
+
+	def add_layers(self):
+		"""Add styles and connections to the slider."""
+		self.ui.sliderSacler.setGeometry(10, 10, 300, 40)
+		self.ui.sliderSacler.setStyleSheet(sliderStyleSheet)
+		self.ui.sliderSacler.valueChanged.connect(
+			lambda: self.ui.label.setText(f"Slider Value: {self.ui.sliderSacler.value() / 10.0}")
+		)
+
+	def update_sphere_translation(self):
+		"""Update the sphere's translateX attribute when the slider is moved."""
+		value = self.ui.sliderSacler.value() / 10.0
+		cmds.setAttr(f"{self.sphere_name}.translateX", value)
+
+	def reset_sphere_translation(self):
+		"""Reset the sphere's translateX attribute to 0 and update the slider."""
+		cmds.setAttr(f"{self.sphere_name}.translateX", 0.0)
+		self.ui.sliderSacler.setValue(0)
+
+	def on_translate_change(self, msg, plug, other_plug, client_data):
+
+		# con_world_L.all_translate
+		"""Update the slider and label when the sphere's translateX attribute changes."""
+		print(client_data)
+		node_fn = om.MFnDependencyNode(client_data)
+		translate_plug = node_fn.findPlug("translateX", False)
+		if plug == translate_plug:
+			value = cmds.getAttr(f"{self.sphere_name}.translateX")
+			self.ui.sliderSacler.blockSignals(True)
+			self.ui.sliderSacler.setValue(int(value * 10))  # Multiply to match slider granularity
+			self.ui.sliderSacler.blockSignals(False)
+			self.ui.label.setText(f"Slider Value: {value:.2f}")
+
+	def create_callback(self):
+		"""Create a callback to monitor changes to the sphere's translateX attribute."""
+		selection_list = om.MSelectionList()
+		try:
+			selection_list.add(self.sphere_name)
+		except RuntimeError:
+			cmds.warning(f"Sphere '{self.sphere_name}' not found in the scene.")
+			return
+
+		node = om.MObject()
+		selection_list.getDependNode(0, node)
+		self.callback_id = om.MNodeMessage.addAttributeChangedCallback(
+			node, self.on_translate_change, node
+		)
+		print(f"Callback created for {self.sphere_name}")
+
+	def closeEvent(self, event):
+		"""Cleanup the callback when the window is closed."""
+		if hasattr(self, 'callback_id') and self.callback_id:
+			om.MMessage.removeCallback(self.callback_id)
+			self.callback_id = None
+		event.accept()
+
+# ==========================================================================================================
+def show_window():
+	"""Show the window."""
+	global my_window
+	if 'my_window' in globals() and my_window is not None:
+		try:
+			my_window.close()  # Close the window if it already exists
+			my_window.deleteLater()
+		except:
+			pass
+
+	my_window = MyWindow(parent=get_maya_window())
+	my_window.show()
